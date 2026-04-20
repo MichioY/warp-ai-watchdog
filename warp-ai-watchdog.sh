@@ -144,8 +144,12 @@ run_once() {
   acquire_lock
 
   ip_now="$(current_ip 2>/dev/null || true)"
-  healthy_openai && ok_openai=1 || true
-  healthy_gemini && ok_gemini=1 || true
+  if healthy_openai; then
+    ok_openai=1
+  fi
+  if healthy_gemini; then
+    ok_gemini=1
+  fi
 
   if [[ $ok_openai -eq 1 && $ok_gemini -eq 1 ]]; then
     log "ok openai=1 gemini=1 ip=${ip_now:-unknown}"
