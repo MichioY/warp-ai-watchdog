@@ -3,6 +3,8 @@
 [![CI](https://github.com/MichioY/warp-ai-watchdog/actions/workflows/ci.yml/badge.svg)](https://github.com/MichioY/warp-ai-watchdog/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/MichioY/warp-ai-watchdog)](https://github.com/MichioY/warp-ai-watchdog/releases)
 
+中文说明见：[README.zh-CN.md](README.zh-CN.md)
+
 `warp-ai-watchdog` is a small watchdog for WARP-based AI routing on Linux hosts.
 
 It probes a WARP SOCKS endpoint with browser-adjacent checks for services like
