@@ -1,6 +1,6 @@
 # warp-ai-watchdog
 
-`warp-ai-watchdog` is a small watchdog for WARP-based AI routing.
+`warp-ai-watchdog` is a small watchdog for WARP-based AI routing on Linux hosts.
 
 It probes a WARP SOCKS endpoint with browser-adjacent checks for services like
 OpenAI and Gemini, and automatically reconnects WARP when the current exit IP
@@ -59,6 +59,21 @@ These checks are practical heuristics, not formal guarantees.
   - default: `127.0.0.1:40000`
 - `bash`, `curl`, `flock`
 
+## When To Use It
+
+Use this project when:
+
+- WARP is already part of your routing path
+- AI services intermittently fail because the current exit reputation is poor
+- you want an operator-safe local auto-heal loop instead of manual reconnects
+
+Do not use this project as:
+
+- a generic proxy manager
+- a panel replacement
+- a cross-platform desktop tool
+- a guarantee of permanent Gemini or OpenAI reachability
+
 ## Repository Layout
 
 - `warp-ai-watchdog.sh`
@@ -67,6 +82,8 @@ These checks are practical heuristics, not formal guarantees.
   - installs the script, config file, and systemd units
 - `uninstall.sh`
   - removes the installed components
+- `warp-ai-watchdog.env.example`
+  - example environment file
 - `systemd/warp-ai-watchdog.service`
   - oneshot service
 - `systemd/warp-ai-watchdog.timer`
@@ -80,6 +97,12 @@ cd warp-ai-watchdog
 sudo ./install.sh
 ```
 
+Review the generated config at:
+
+```bash
+sudo sed -n '1,200p' /etc/default/warp-ai-watchdog
+```
+
 After install:
 
 ```bash
@@ -90,10 +113,12 @@ sudo tail -f /var/log/warp-ai-watchdog.log
 
 ## Configuration
 
-The installer writes:
+The installer writes `/etc/default/warp-ai-watchdog`.
+
+You can also start from the repository example:
 
 ```bash
-/etc/default/warp-ai-watchdog
+cp warp-ai-watchdog.env.example /tmp/warp-ai-watchdog.env
 ```
 
 Supported settings:
@@ -103,6 +128,7 @@ SOCKS_HOST=127.0.0.1
 SOCKS_PORT=40000
 OPENAI_URL=https://chat.openai.com/cdn-cgi/trace
 GEMINI_URL=https://gemini.google.com/
+USER_AGENT=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36
 MAX_ATTEMPTS=3
 CURL_TIMEOUT=25
 GEMINI_TIMEOUT=35
@@ -110,9 +136,11 @@ MAX_REDIRS=8
 DISCONNECT_SLEEP=3
 CONNECT_SLEEP=8
 SERVICE_RESTART_SLEEP=8
-CHECK_INTERVAL_MINUTES=5
+WARP_CLI_BIN=warp-cli
+WARP_SERVICE_NAME=warp-svc
 LOG_FILE=/var/log/warp-ai-watchdog.log
 STATE_DIR=/var/lib/warp-ai-watchdog
+LOCK_FILE=/run/warp-ai-watchdog.lock
 ```
 
 After editing the config:
@@ -122,6 +150,9 @@ sudo systemctl daemon-reload
 sudo systemctl restart warp-ai-watchdog.timer
 sudo systemctl start warp-ai-watchdog.service
 ```
+
+Timer cadence is configured in [`systemd/warp-ai-watchdog.timer`](systemd/warp-ai-watchdog.timer).
+If you want a different interval, edit the timer unit and reload systemd.
 
 ## Health Logic
 
@@ -140,6 +171,32 @@ The watchdog uses this decision model:
 
 This means the watchdog does not look for a theoretically "clean" IP. It looks
 for an IP that passes the actual site probes now.
+
+## Verification
+
+Run one cycle manually:
+
+```bash
+sudo /usr/local/bin/warp-ai-watchdog --run
+echo $?
+```
+
+Inspect recent logs:
+
+```bash
+sudo tail -n 50 /var/log/warp-ai-watchdog.log
+```
+
+Inspect timer state:
+
+```bash
+sudo systemctl list-timers --all | grep warp-ai-watchdog
+```
+
+Expected healthy log patterns:
+
+- `ok openai=1 gemini=1 ip=...`
+- `recovered attempt=... openai=1 gemini=1 ip=...`
 
 ## Manual Commands
 
@@ -162,6 +219,36 @@ curl --socks5-hostname 127.0.0.1:40000 \
   -fsS https://chat.openai.com/cdn-cgi/trace
 ```
 
+Check Gemini with redirects and a cookie jar:
+
+```bash
+tmp_cookie="$(mktemp)"
+curl --socks5-hostname 127.0.0.1:40000 \
+  -A 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36' \
+  -sS -L -c "$tmp_cookie" -b "$tmp_cookie" -D - -o /dev/null \
+  https://gemini.google.com/
+rm -f "$tmp_cookie"
+```
+
+## Troubleshooting
+
+### The timer is active but nothing happens
+
+- check `sudo journalctl -u warp-ai-watchdog.service -n 50 --no-pager`
+- check `sudo tail -n 50 /var/log/warp-ai-watchdog.log`
+- verify `warp-cli status`
+
+### The watchdog keeps rotating without recovery
+
+- confirm the SOCKS listener is actually WARP-backed
+- confirm `warp-cli connect` changes connectivity on that host
+- reduce assumptions: passing probes are service-specific and time-sensitive
+
+### I need a different check target
+
+- keep the default logic unless you have a measured reason
+- if you patch `OPENAI_URL` or `GEMINI_URL`, validate the semantics yourself
+
 ## Limitations
 
 - A "healthy" result only means the current probes passed.
@@ -179,6 +266,10 @@ curl --socks5-hostname 127.0.0.1:40000 \
   - `warp-cli connect`
   - `systemctl restart warp-svc`
 - It stores transient cookies only under the configured state directory.
+
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## License
 

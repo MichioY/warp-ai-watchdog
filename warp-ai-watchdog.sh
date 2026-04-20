@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# [PROTOCOL]
+# Purpose: Probe WARP-backed AI reachability and rotate WARP when probes degrade.
+# Inputs: Environment variables, local SOCKS listener, warp-cli, systemd warp service.
+# Outputs: Exit status plus append-only operational logs under LOG_FILE.
+# Invariants: Never edits WARP registration, never runs concurrently, only heals via local reconnects.
 set -euo pipefail
 
 LOG_FILE="${LOG_FILE:-/var/log/warp-ai-watchdog.log}"
@@ -9,6 +14,7 @@ SOCKS_HOST="${SOCKS_HOST:-127.0.0.1}"
 SOCKS_PORT="${SOCKS_PORT:-40000}"
 OPENAI_URL="${OPENAI_URL:-https://chat.openai.com/cdn-cgi/trace}"
 GEMINI_URL="${GEMINI_URL:-https://gemini.google.com/}"
+USER_AGENT="${USER_AGENT:-Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36}"
 
 MAX_ATTEMPTS="${MAX_ATTEMPTS:-3}"
 CURL_TIMEOUT="${CURL_TIMEOUT:-25}"
@@ -23,10 +29,6 @@ WARP_SERVICE_NAME="${WARP_SERVICE_NAME:-warp-svc}"
 
 COOKIE_JAR="${STATE_DIR}/gemini-cookiejar.txt"
 
-mkdir -p "$(dirname "$LOG_FILE")" "$STATE_DIR" /run
-exec 9>"$LOCK_FILE"
-flock -n 9 || exit 0
-
 log() {
   printf '%s %s\n' "$(date -Is)" "$*" >>"$LOG_FILE"
 }
@@ -39,13 +41,22 @@ require_bin() {
   }
 }
 
-proxy_args() {
-  printf -- '--socks5-hostname\n%s:%s\n' "$SOCKS_HOST" "$SOCKS_PORT"
+prepare_runtime() {
+  mkdir -p "$(dirname "$LOG_FILE")" "$STATE_DIR" /run
+}
+
+acquire_lock() {
+  exec 9>"$LOCK_FILE"
+  flock -n 9 || exit 0
+}
+
+probe_proxy() {
+  printf '%s:%s' "$SOCKS_HOST" "$SOCKS_PORT"
 }
 
 probe_openai() {
   curl \
-    "$(proxy_args)" \
+    --socks5-hostname "$(probe_proxy)" \
     -fsS \
     -m "$CURL_TIMEOUT" \
     "$OPENAI_URL"
@@ -58,15 +69,17 @@ current_ip() {
 probe_gemini_headers() {
   : >"$COOKIE_JAR"
   curl \
-    "$(proxy_args)" \
+    --socks5-hostname "$(probe_proxy)" \
     -sS \
     -m "$GEMINI_TIMEOUT" \
     --max-redirs "$MAX_REDIRS" \
+    -A "$USER_AGENT" \
     -c "$COOKIE_JAR" \
     -b "$COOKIE_JAR" \
     -L \
     -D - \
     -o /dev/null \
+    -w '\nCURL_HTTP_CODE=%{http_code}\nCURL_EFFECTIVE_URL=%{url_effective}\n' \
     "$GEMINI_URL"
 }
 
@@ -85,6 +98,10 @@ healthy_gemini() {
   fi
   if grep -qi 'location: https://www.google.com/sorry/index' <<<"$headers"; then
     log "gemini_probe=sorry"
+    return 1
+  fi
+  if grep -qi '^CURL_EFFECTIVE_URL=.*google\.com/sorry/' <<<"$headers"; then
+    log "gemini_probe=effective_sorry"
     return 1
   fi
   if grep -qi '^HTTP/2 200' <<<"$headers" || grep -qi '^HTTP/1.1 200' <<<"$headers"; then
@@ -121,8 +138,10 @@ heal_once() {
 run_once() {
   local ok_openai=0 ok_gemini=0 attempt=0 ip_now=""
 
+  prepare_runtime
   require_bin curl || return 1
   require_bin flock || return 1
+  acquire_lock
 
   ip_now="$(current_ip 2>/dev/null || true)"
   healthy_openai && ok_openai=1 || true
@@ -174,6 +193,7 @@ Environment variables:
   SERVICE_RESTART_SLEEP
   WARP_CLI_BIN
   WARP_SERVICE_NAME
+  USER_AGENT
   LOG_FILE
   STATE_DIR
   LOCK_FILE

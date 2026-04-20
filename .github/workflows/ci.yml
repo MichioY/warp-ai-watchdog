@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  shell-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: Bash syntax check
+        run: bash -n warp-ai-watchdog.sh install.sh uninstall.sh
+
+      - name: Help output
+        run: |
+          ./warp-ai-watchdog.sh --help
+          ./install.sh --help
+          ./uninstall.sh --help
+
+      - name: ShellCheck
+        run: shellcheck warp-ai-watchdog.sh install.sh uninstall.sh
+
+      - name: Diff hygiene
+        run: git diff --check

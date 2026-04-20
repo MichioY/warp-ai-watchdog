@@ -1,5 +1,40 @@
 #!/usr/bin/env bash
+# [PROTOCOL]
+# Purpose: Remove installed service files and the binary while keeping operator data.
+# Inputs: Root privileges on a host where the watchdog has been installed.
+# Outputs: Deletes installed unit files and binary, preserves env/log/state directories.
+# Invariants: Never removes /etc/default/warp-ai-watchdog or runtime logs by default.
 set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage: sudo ./uninstall.sh
+
+Removes:
+  /usr/local/bin/warp-ai-watchdog
+  /etc/systemd/system/warp-ai-watchdog.service
+  /etc/systemd/system/warp-ai-watchdog.timer
+
+Keeps:
+  /etc/default/warp-ai-watchdog
+  /var/log/warp-ai-watchdog.log
+  /var/lib/warp-ai-watchdog
+USAGE
+}
+
+case "${1:-}" in
+  --help|-h)
+    usage
+    exit 0
+    ;;
+  "")
+    ;;
+  *)
+    echo "Unknown argument: $1" >&2
+    usage >&2
+    exit 2
+    ;;
+esac
 
 [[ $EUID -eq 0 ]] || {
   echo "Run as root." >&2
