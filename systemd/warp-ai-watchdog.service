@@ -1,0 +1,9 @@
+[Unit]
+Description=WARP AI health watchdog
+After=network-online.target warp-svc.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/default/warp-ai-watchdog
+ExecStart=/usr/local/bin/warp-ai-watchdog --run

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run WARP AI watchdog every 5 minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+Unit=warp-ai-watchdog.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target
