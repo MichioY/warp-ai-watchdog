@@ -170,8 +170,12 @@ measure_health() {
 heal_once() {
   local before_ip after_ip changed=no service_active=no listener_ready=no
   before_ip="$(current_ip 2>/dev/null || true)"
-  warp_service_active && service_active=yes || true
-  socks_listener_ready && listener_ready=yes || true
+  if warp_service_active; then
+    service_active=yes
+  fi
+  if socks_listener_ready; then
+    listener_ready=yes
+  fi
   log "heal_start before_ip=${before_ip:-unknown} service_active=${service_active} listener_ready=${listener_ready}"
 
   if [[ "$service_active" == "yes" && "$listener_ready" == "yes" ]]; then
@@ -212,8 +216,12 @@ run_once() {
     return 0
   fi
 
-  warp_service_active && service_active=yes || true
-  socks_listener_ready && listener_ready=yes || true
+  if warp_service_active; then
+    service_active=yes
+  fi
+  if socks_listener_ready; then
+    listener_ready=yes
+  fi
 
   if [[ "$service_active" == "yes" && "$listener_ready" == "yes" ]]; then
     sleep "$VERIFY_RECHECK_DELAY"
