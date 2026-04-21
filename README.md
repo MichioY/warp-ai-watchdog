@@ -135,6 +135,8 @@ OPENAI_URL=https://chat.openai.com/cdn-cgi/trace
 GEMINI_URL=https://gemini.google.com/
 USER_AGENT=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36
 MAX_ATTEMPTS=3
+MIN_CONSECUTIVE_FAILURES=2
+VERIFY_RECHECK_DELAY=3
 CURL_TIMEOUT=25
 GEMINI_TIMEOUT=35
 MAX_REDIRS=8
@@ -165,17 +167,24 @@ The watchdog uses this decision model:
 
 1. Probe OpenAI through WARP.
 2. Probe Gemini through WARP using redirects plus a cookie jar.
-3. If both are healthy, exit cleanly.
-4. If either is degraded:
-   - disconnect WARP
-   - reconnect WARP
-   - restart `warp-svc`
-   - compare the current exit IP against the previous one
-   - probe again
-5. Stop after `MAX_ATTEMPTS`.
+3. If both are healthy, reset the failure counter and exit cleanly.
+4. If the service is up and the SOCKS listener exists, wait `VERIFY_RECHECK_DELAY`
+   seconds and probe once more before taking recovery action.
+5. If degradation is only transient, reset the failure counter and exit cleanly.
+6. If degradation persists, increment a consecutive failure counter.
+7. Only heal immediately when:
+   - `warp-svc` is not active, or
+   - the SOCKS listener is missing, or
+   - the failure counter has reached `MIN_CONSECUTIVE_FAILURES`
+8. Healing is staged:
+   - first try `warp-cli disconnect` plus `warp-cli connect` when the service is
+     still up
+   - then restart `warp-svc` only if the service or listener is still unhealthy
+9. Stop after `MAX_ATTEMPTS`.
 
 This means the watchdog does not look for a theoretically "clean" IP. It looks
-for an IP that passes the actual site probes now.
+for an IP that passes the actual site probes now, while avoiding unnecessary
+session churn from one-off probe failures.
 
 ## Verification
 
@@ -248,6 +257,7 @@ rm -f "$tmp_cookie"
 - confirm the SOCKS listener is actually WARP-backed
 - confirm `warp-cli connect` changes connectivity on that host
 - reduce assumptions: passing probes are service-specific and time-sensitive
+- increase `MIN_CONSECUTIVE_FAILURES` if your environment is especially noisy
 
 ### I need a different check target
 

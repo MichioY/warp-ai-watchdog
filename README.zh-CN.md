@@ -132,6 +132,8 @@ OPENAI_URL=https://chat.openai.com/cdn-cgi/trace
 GEMINI_URL=https://gemini.google.com/
 USER_AGENT=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36
 MAX_ATTEMPTS=3
+MIN_CONSECUTIVE_FAILURES=2
+VERIFY_RECHECK_DELAY=3
 CURL_TIMEOUT=25
 GEMINI_TIMEOUT=35
 MAX_REDIRS=8
@@ -162,16 +164,21 @@ watchdog 的判断流程如下：
 
 1. 通过 WARP 探测 OpenAI。
 2. 通过 WARP 探测 Gemini，并跟随跳转、携带 cookie jar。
-3. 如果两项都健康，则直接退出。
-4. 只要任意一项退化，就执行：
-   - 断开 WARP
-   - 重连 WARP
-   - 重启 `warp-svc`
-   - 比较重连前后的出口 IP
-   - 再次探测
-5. 达到 `MAX_ATTEMPTS` 后停止。
+3. 如果两项都健康，则清零连续失败计数并直接退出。
+4. 如果 `warp-svc` 还活着且 SOCKS 监听还在，先等待 `VERIFY_RECHECK_DELAY`
+   秒，再做一次复检。
+5. 如果只是瞬时抖动，清零失败计数并退出。
+6. 如果退化持续存在，则增加连续失败计数。
+7. 只有在以下情况才立即进入修复：
+   - `warp-svc` 不活跃
+   - SOCKS 监听消失
+   - 连续失败次数达到 `MIN_CONSECUTIVE_FAILURES`
+8. 修复策略分级执行：
+   - 优先尝试 `warp-cli disconnect` 加 `warp-cli connect`
+   - 只有服务或监听仍异常时，才重启 `warp-svc`
+9. 达到 `MAX_ATTEMPTS` 后停止。
 
-这意味着它并不是在寻找“理论上最干净”的 IP，而是在寻找“当前真实站点检查能通过”的 IP。
+这意味着它并不是在寻找“理论上最干净”的 IP，而是在寻找“当前真实站点检查能通过”的 IP，同时尽量避免因为一次性探测失败而频繁打断现有会话。
 
 ## 如何验证
 
@@ -244,6 +251,7 @@ rm -f "$tmp_cookie"
 - 确认 SOCKS 监听背后确实是 WARP
 - 确认 `warp-cli connect` 在该主机上真的会改变连接状态
 - 降低预期：这些探测结果与具体服务、具体时间窗口强相关
+- 如果环境本身抖动较大，可以适当提高 `MIN_CONSECUTIVE_FAILURES`
 
 ### 我想替换成别的检查目标
 

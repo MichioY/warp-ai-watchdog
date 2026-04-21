@@ -9,6 +9,7 @@ set -euo pipefail
 LOG_FILE="${LOG_FILE:-/var/log/warp-ai-watchdog.log}"
 STATE_DIR="${STATE_DIR:-/var/lib/warp-ai-watchdog}"
 LOCK_FILE="${LOCK_FILE:-/run/warp-ai-watchdog.lock}"
+FAIL_COUNT_FILE="${STATE_DIR}/consecutive_failures"
 
 SOCKS_HOST="${SOCKS_HOST:-127.0.0.1}"
 SOCKS_PORT="${SOCKS_PORT:-40000}"
@@ -17,6 +18,8 @@ GEMINI_URL="${GEMINI_URL:-https://gemini.google.com/}"
 USER_AGENT="${USER_AGENT:-Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36}"
 
 MAX_ATTEMPTS="${MAX_ATTEMPTS:-3}"
+MIN_CONSECUTIVE_FAILURES="${MIN_CONSECUTIVE_FAILURES:-2}"
+VERIFY_RECHECK_DELAY="${VERIFY_RECHECK_DELAY:-3}"
 CURL_TIMEOUT="${CURL_TIMEOUT:-25}"
 GEMINI_TIMEOUT="${GEMINI_TIMEOUT:-35}"
 MAX_REDIRS="${MAX_REDIRS:-8}"
@@ -28,6 +31,9 @@ WARP_CLI_BIN="${WARP_CLI_BIN:-warp-cli}"
 WARP_SERVICE_NAME="${WARP_SERVICE_NAME:-warp-svc}"
 
 COOKIE_JAR="${STATE_DIR}/gemini-cookiejar.txt"
+OPENAI_OK=0
+GEMINI_OK=0
+IP_NOW=""
 
 log() {
   printf '%s %s\n' "$(date -Is)" "$*" >>"$LOG_FILE"
@@ -43,6 +49,7 @@ require_bin() {
 
 prepare_runtime() {
   mkdir -p "$(dirname "$LOG_FILE")" "$STATE_DIR" /run
+  : >"$COOKIE_JAR"
 }
 
 acquire_lock() {
@@ -52,6 +59,38 @@ acquire_lock() {
 
 probe_proxy() {
   printf '%s:%s' "$SOCKS_HOST" "$SOCKS_PORT"
+}
+
+warp_service_active() {
+  systemctl is-active --quiet "$WARP_SERVICE_NAME"
+}
+
+socks_listener_ready() {
+  ss -ltn 2>/dev/null | awk -v port=":${SOCKS_PORT}" '$4 ~ (port "$") { found=1 } END { exit(found ? 0 : 1) }'
+}
+
+read_fail_count() {
+  if [[ -f "$FAIL_COUNT_FILE" ]]; then
+    cat "$FAIL_COUNT_FILE"
+  else
+    echo 0
+  fi
+}
+
+write_fail_count() {
+  printf '%s\n' "$1" >"$FAIL_COUNT_FILE"
+}
+
+reset_fail_count() {
+  write_fail_count 0
+}
+
+increment_fail_count() {
+  local count
+  count="$(read_fail_count)"
+  count=$((count + 1))
+  write_fail_count "$count"
+  printf '%s\n' "$count"
 }
 
 probe_openai() {
@@ -84,8 +123,12 @@ probe_gemini_headers() {
 }
 
 healthy_openai() {
-  local trace
-  trace="$(probe_openai || true)"
+  local trace rc=0
+  trace="$(probe_openai 2>&1)" || rc=$?
+  if [[ $rc -ne 0 ]]; then
+    log "openai_probe_rc=${rc}"
+    return 1
+  fi
   grep -q '^warp=on$' <<<"$trace" && grep -q '^ip=' <<<"$trace"
 }
 
@@ -111,19 +154,34 @@ healthy_gemini() {
   return 1
 }
 
-heal_once() {
-  local before_ip after_ip changed=no
-  before_ip="$(current_ip 2>/dev/null || true)"
-  log "heal_start before_ip=${before_ip:-unknown}"
+measure_health() {
+  OPENAI_OK=0
+  GEMINI_OK=0
+  IP_NOW="$(current_ip 2>/dev/null || true)"
 
-  if command -v "$WARP_CLI_BIN" >/dev/null 2>&1; then
+  if healthy_openai; then
+    OPENAI_OK=1
+  fi
+  if healthy_gemini; then
+    GEMINI_OK=1
+  fi
+}
+
+heal_once() {
+  local before_ip after_ip changed=no service_active=no listener_ready=no
+  before_ip="$(current_ip 2>/dev/null || true)"
+  warp_service_active && service_active=yes || true
+  socks_listener_ready && listener_ready=yes || true
+  log "heal_start before_ip=${before_ip:-unknown} service_active=${service_active} listener_ready=${listener_ready}"
+
+  if [[ "$service_active" == "yes" && "$listener_ready" == "yes" ]]; then
     "$WARP_CLI_BIN" disconnect >>"$LOG_FILE" 2>&1 || true
     sleep "$DISCONNECT_SLEEP"
     "$WARP_CLI_BIN" connect >>"$LOG_FILE" 2>&1 || true
     sleep "$CONNECT_SLEEP"
   fi
 
-  if command -v systemctl >/dev/null 2>&1; then
+  if ! warp_service_active || ! socks_listener_ready; then
     systemctl restart "$WARP_SERVICE_NAME" >>"$LOG_FILE" 2>&1 || true
     sleep "$SERVICE_RESTART_SLEEP"
   fi
@@ -136,41 +194,58 @@ heal_once() {
 }
 
 run_once() {
-  local ok_openai=0 ok_gemini=0 attempt=0 ip_now=""
+  local consecutive_failures=0 attempt=0 service_active=no listener_ready=no
 
   prepare_runtime
   require_bin curl || return 1
   require_bin flock || return 1
+  require_bin systemctl || return 1
+  require_bin ss || return 1
+  require_bin "$WARP_CLI_BIN" || return 1
   acquire_lock
 
-  ip_now="$(current_ip 2>/dev/null || true)"
-  if healthy_openai; then
-    ok_openai=1
-  fi
-  if healthy_gemini; then
-    ok_gemini=1
-  fi
+  measure_health
 
-  if [[ $ok_openai -eq 1 && $ok_gemini -eq 1 ]]; then
-    log "ok openai=1 gemini=1 ip=${ip_now:-unknown}"
+  if [[ $OPENAI_OK -eq 1 && $GEMINI_OK -eq 1 ]]; then
+    reset_fail_count
+    log "ok openai=1 gemini=1 ip=${IP_NOW:-unknown}"
     return 0
   fi
 
-  log "degraded openai=${ok_openai} gemini=${ok_gemini} ip=${ip_now:-unknown}"
-  for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
-    heal_once
-    ip_now="$(current_ip 2>/dev/null || true)"
-    healthy_openai && ok_openai=1 || ok_openai=0
-    healthy_gemini && ok_gemini=1 || ok_gemini=0
+  warp_service_active && service_active=yes || true
+  socks_listener_ready && listener_ready=yes || true
 
-    if [[ $ok_openai -eq 1 && $ok_gemini -eq 1 ]]; then
-      log "recovered attempt=${attempt} openai=1 gemini=1 ip=${ip_now:-unknown}"
+  if [[ "$service_active" == "yes" && "$listener_ready" == "yes" ]]; then
+    sleep "$VERIFY_RECHECK_DELAY"
+    measure_health
+    if [[ $OPENAI_OK -eq 1 && $GEMINI_OK -eq 1 ]]; then
+      reset_fail_count
+      log "transient_recovered openai=1 gemini=1 ip=${IP_NOW:-unknown}"
       return 0
     fi
-    log "attempt_failed attempt=${attempt} openai=${ok_openai} gemini=${ok_gemini} ip=${ip_now:-unknown}"
+  fi
+
+  consecutive_failures="$(increment_fail_count)"
+  log "degraded openai=${OPENAI_OK} gemini=${GEMINI_OK} ip=${IP_NOW:-unknown} service_active=${service_active} listener_ready=${listener_ready} consecutive_failures=${consecutive_failures}"
+
+  if [[ "$service_active" == "yes" && "$listener_ready" == "yes" && "$consecutive_failures" -lt "$MIN_CONSECUTIVE_FAILURES" ]]; then
+    log "defer_heal threshold=${MIN_CONSECUTIVE_FAILURES} consecutive_failures=${consecutive_failures}"
+    return 0
+  fi
+
+  for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
+    heal_once
+    measure_health
+
+    if [[ $OPENAI_OK -eq 1 && $GEMINI_OK -eq 1 ]]; then
+      reset_fail_count
+      log "recovered attempt=${attempt} openai=1 gemini=1 ip=${IP_NOW:-unknown}"
+      return 0
+    fi
+    log "attempt_failed attempt=${attempt} openai=${OPENAI_OK} gemini=${GEMINI_OK} ip=${IP_NOW:-unknown}"
   done
 
-  log "still_degraded openai=${ok_openai} gemini=${ok_gemini} ip=${ip_now:-unknown}"
+  log "still_degraded openai=${OPENAI_OK} gemini=${GEMINI_OK} ip=${IP_NOW:-unknown}"
   return 1
 }
 
@@ -189,6 +264,8 @@ Environment variables:
   OPENAI_URL
   GEMINI_URL
   MAX_ATTEMPTS
+  MIN_CONSECUTIVE_FAILURES
+  VERIFY_RECHECK_DELAY
   CURL_TIMEOUT
   GEMINI_TIMEOUT
   MAX_REDIRS

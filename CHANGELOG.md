@@ -4,7 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-No unreleased changes yet.
+### Changed
+
+- added staged healing so the watchdog only restarts `warp-svc` when the
+  service or SOCKS listener is still unhealthy after a reconnect attempt
+- added transient recheck plus consecutive-failure gating to reduce unnecessary
+  WARP session churn from one-off probe failures
+- added `MIN_CONSECUTIVE_FAILURES` and `VERIFY_RECHECK_DELAY` configuration
+  knobs for noisy environments
 
 ## [0.1.0] - 2026-04-20
 
